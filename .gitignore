@@ -3,3 +3,6 @@ data/processed/
 models/*.keras
 models/logs/
 models/*.png
+data/chains/
+data/labels/
+.env
