@@ -326,8 +326,16 @@ def load_feed_urls():
                         urls.add(row["url"].strip())
         except Exception:
             pass
-    for f in glob.glob("data/raw/*/openphish_feed.txt") + glob.glob("data/raw/*/urlhaus_text_online.txt"):
+    for f in glob.glob("data/raw/*/openphish_feed.txt"):
         urls.update(l.strip() for l in open(f, encoding="utf-8", errors="ignore") if l.strip())
+    for f in glob.glob("data/raw/*/urlhaus_*.txt"):
+        lines = [l for l in open(f, encoding="utf-8", errors="ignore")
+                 if l.strip() and not l.startswith("#")]
+        for row in csv.reader(lines):
+            for cell in row[:4]:
+                if cell.startswith("http"):
+                    urls.add(cell.strip())
+                    break
     for f in glob.glob("data/raw/*/urlhaus_recent.json"):
         try:
             urls.update(u["url"] for u in json.load(open(f, encoding="utf-8")).get("urls", []))

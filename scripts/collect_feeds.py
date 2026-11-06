@@ -27,6 +27,7 @@ Usage (Git Bash):
 """
 
 import argparse
+import csv
 import hashlib
 import io
 import json
@@ -71,28 +72,36 @@ def fetch_urlhaus(out: Path, meta: dict) -> pd.DataFrame:
             return pd.DataFrame({"url": urls, "label_hint": 1, "source": "urlhaus"})
         except Exception as e:
             print(f"    API failed: {e}")
-    # 2) bulk CSV of recent URLs (may also need the key)
-    for ep in ("https://urlhaus.abuse.ch/downloads/csv_recent/",
-               "https://urlhaus.abuse.ch/downloads/text_online/"):
+    # 2) bulk exports: newer abuse.ch exports put the key in the path,
+    #    older ones used plain download URLs (now 410 Gone)
+    eps = []
+    if key:
+        eps += [f"https://urlhaus-api.abuse.ch/v2/files/exports/{key}/recent.csv",
+                f"https://urlhaus-api.abuse.ch/v2/files/exports/recent.csv?auth-key={key}"]
+    eps += ["https://urlhaus.abuse.ch/downloads/csv_recent/",
+            "https://urlhaus.abuse.ch/downloads/text_online/"]
+    for ep in eps:
         try:
             r = requests.get(ep, headers=hdr, timeout=60)
             r.raise_for_status()
-            (out / ("urlhaus_" + ep.rstrip("/").split("/")[-1] + ".txt")).write_text(r.text, encoding="utf-8")
+            name = "export_recent" if "/exports/" in ep else ep.rstrip("/").split("/")[-1]
+            (out / f"urlhaus_{name}.txt").write_text(r.text, encoding="utf-8")
             urls = []
-            for line in r.text.splitlines():
-                if not line.strip() or line.startswith("#"):
-                    continue
-                if line.startswith('"'):
-                    parts = line.split('","')
-                    if len(parts) >= 4 and parts[3].strip('"') == "online":
-                        urls.append(parts[2].strip('"'))
-                else:
-                    urls.append(line.strip())
-            meta["urlhaus"] = {"downloaded_utc": now(), "endpoint": ep, "rows": len(urls)}
-            print(f"    {len(urls):,} online URLs ({ep.split('/')[-2]})")
+            lines = [l for l in r.text.splitlines() if l.strip() and not l.startswith("#")]
+            for row in csv.reader(lines):
+                if len(row) >= 4 and row[2].startswith("http"):
+                    if row[3].strip().lower() == "online":       # id,dateadded,url,url_status,...
+                        urls.append(row[2].strip())
+                elif len(row) == 1 and row[0].startswith("http"):  # plain list of URLs
+                    urls.append(row[0].strip())
+            label = "v2 export" if "/exports/" in ep else ep.split('/')[-2]
+            meta["urlhaus"] = {"downloaded_utc": now(), "endpoint": label, "rows": len(urls)}
+            print(f"    {len(urls):,} online URLs ({label})")
             return pd.DataFrame({"url": urls, "label_hint": 1, "source": "urlhaus"})
         except Exception as e:
-            print(f"    {ep.split('/')[-2]} failed: {e}")
+            label = "v2 export" if "/exports/" in ep else ep.split('/')[-2]
+            msg = str(e).replace(key, "<key>") if key else str(e)
+            print(f"    {label} failed: {msg[:120]}")
     print("    URLhaus skipped (get a free Auth-Key at https://auth.abuse.ch)")
     meta["urlhaus"] = {"error": "no endpoint reachable"}
     return pd.DataFrame(columns=["url", "label_hint", "source"])
