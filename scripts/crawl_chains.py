@@ -368,6 +368,40 @@ async def harvest_outlinks(page) -> list:
     return (redir + other)[:MAX_OUTLINKS]
 
 
+async def internet_up() -> bool:
+    """True if any of a few well-known public endpoints accepts a TCP connection."""
+    for host, port in (("1.1.1.1", 443), ("8.8.8.8", 53), ("9.9.9.9", 443), ("www.google.com", 443)):
+        try:
+            _, w = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=4)
+            w.close()
+            return True
+        except Exception:
+            continue
+    return False
+
+
+class Connectivity:
+    """Shared by all workers: when the internet drops, everyone pauses and the
+    seed that failed is put back in the queue instead of being recorded."""
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.offline_since = None
+
+    async def wait_until_online(self):
+        async with self.lock:
+            if await internet_up():
+                return
+            self.offline_since = time.monotonic()
+            print("[!] Internet connection lost - pausing (seeds are kept, nothing is skipped)",
+                  flush=True)
+            while not await internet_up():
+                await asyncio.sleep(15)
+            mins = (time.monotonic() - self.offline_since) / 60
+            print(f"[*] Connection back after {mins:.1f} min - resuming", flush=True)
+            self.offline_since = None
+
+
 def classify_error(msg: str) -> str:
     m = msg.lower()
     if "err_name_not_resolved" in m:
@@ -431,6 +465,8 @@ async def run(args):
     t_start = time.monotonic()
     fh = open(out, "a", encoding="utf-8")
 
+    net = Connectivity()
+
     async with async_playwright() as p:
         async def worker(wid: int):
             browser = None
@@ -464,6 +500,12 @@ async def run(args):
                         pass
                     browser = None
                 used += 1
+                # a failure while the internet is down is not a dead site:
+                # pause, put the seed back, and crawl it again later
+                if rec.get("status") != "ok" and not await internet_up():
+                    queue.put_nowait(row)
+                    await net.wait_until_online()
+                    continue
                 async with lock:
                     fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
                     fh.flush()
