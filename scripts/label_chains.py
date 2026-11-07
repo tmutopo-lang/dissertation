@@ -318,7 +318,7 @@ def cmd_stats(args):
 def load_feed_urls():
     """Every URL that appeared in any saved feed snapshot (for the hop check)."""
     urls = set()
-    for f in glob.glob("data/raw/*/phishtank_online.csv"):
+    for f in glob.glob("data/raw/**/phishtank_online.csv", recursive=True):
         try:
             with open(f, encoding="utf-8", errors="ignore") as fh:
                 for row in csv.DictReader(fh):
@@ -326,9 +326,9 @@ def load_feed_urls():
                         urls.add(row["url"].strip())
         except Exception:
             pass
-    for f in glob.glob("data/raw/*/openphish_feed.txt"):
+    for f in glob.glob("data/raw/**/openphish_feed.txt", recursive=True):
         urls.update(l.strip() for l in open(f, encoding="utf-8", errors="ignore") if l.strip())
-    for f in glob.glob("data/raw/*/urlhaus_*.txt"):
+    for f in glob.glob("data/raw/**/urlhaus_*.txt", recursive=True):
         lines = [l for l in open(f, encoding="utf-8", errors="ignore")
                  if l.strip() and not l.startswith("#")]
         for row in csv.reader(lines):
@@ -336,7 +336,7 @@ def load_feed_urls():
                 if cell.startswith("http"):
                     urls.add(cell.strip())
                     break
-    for f in glob.glob("data/raw/*/urlhaus_recent.json"):
+    for f in glob.glob("data/raw/**/urlhaus_recent.json", recursive=True):
         try:
             urls.update(u["url"] for u in json.load(open(f, encoding="utf-8")).get("urls", []))
         except Exception:

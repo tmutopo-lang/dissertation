@@ -39,7 +39,7 @@ def main():
     args = ap.parse_args()
 
     seen = set()
-    for f in glob.glob("data/raw/*/seeds.csv") + glob.glob("data/raw/*/outlink_seeds.csv"):
+    for f in glob.glob("data/raw/*/seeds*.csv") + glob.glob("data/raw/*/outlink_seeds*.csv"):
         with open(f, encoding="utf-8") as fh:
             seen.update(r["url"] for r in csv.DictReader(fh))
 
@@ -64,7 +64,10 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     for r in rows:
         r["feed_date"] = today
-    path = out / "outlink_seeds.csv"
+    path, n = out / "outlink_seeds.csv", 1
+    while path.exists():                     # second run the same day -> _b2, _b3 ...
+        n += 1
+        path = out / f"outlink_seeds_b{n}.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["seed_id", "url", "label_hint", "source", "rank",
                                           "feed_date", "parent_seed_id"])

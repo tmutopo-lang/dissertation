@@ -6,3 +6,6 @@ models/*.png
 data/chains/
 data/labels/
 .env
+results/
+__pycache__/
+data/dataset/

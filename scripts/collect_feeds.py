@@ -18,8 +18,11 @@ writes a dated snapshot that the crawler uses as its seed list:
 label_hint is the feed's claim only. Final labels come later from the
 two-source rule plus the 48-hour re-check (label_chains.py).
 
-Run once per collection day, then crawl that day's seeds.csv straight away
-(phishing pages go offline quickly).
+Run it once or twice a day (morning and evening) and crawl each batch
+straight away, because phishing pages go offline quickly. The first run of a
+day writes seeds.csv; later runs the same day write seeds_b2.csv, seeds_b3.csv
+... (raw feeds for those batches go in a b2/, b3/ subfolder), and never repeat
+a URL seeded earlier, whether on a previous day or earlier the same day.
 
 Usage (Git Bash):
   python scripts/collect_feeds.py --benign 6000
@@ -173,11 +176,11 @@ def fetch_tranco(out: Path, meta: dict, n: int, seed: int) -> pd.DataFrame:
         return pd.DataFrame(columns=["url", "label_hint", "source", "rank"])
 
 
-def previously_seen(raw_root: Path, today: str) -> set:
-    """URLs already seeded on earlier days, so each day only adds new seeds."""
+def previously_seen(raw_root: Path, exclude: Path) -> set:
+    """URLs seeded by any earlier batch (earlier days or earlier today)."""
     seen = set()
-    for d in raw_root.glob("*/seeds.csv"):
-        if d.parent.name != today:
+    for d in list(raw_root.glob("*/seeds*.csv")) + list(raw_root.glob("*/outlink_seeds*.csv")):
+        if d.resolve() != exclude.resolve():
             seen.update(pd.read_csv(d, usecols=["url"])["url"].astype(str))
     return seen
 
@@ -193,40 +196,52 @@ def main():
 
     today = datetime.now().strftime("%Y-%m-%d")
     root = Path(args.output)
-    out = root / today
+    day_dir = root / today
+    day_dir.mkdir(parents=True, exist_ok=True)
+    # batch numbering: first run of the day -> seeds.csv, then seeds_b2.csv, ...
+    batch, suffix = 1, ""
+    while (day_dir / f"seeds{suffix}.csv").exists():
+        batch += 1
+        suffix = f"_b{batch}"
+    out = day_dir if batch == 1 else day_dir / f"b{batch}"   # raw feed files
     out.mkdir(parents=True, exist_ok=True)
-    seed = args.seed or int(today.replace("-", ""))
-    meta = {"date": today, "started_utc": now()}
+    seeds_path = day_dir / f"seeds{suffix}.csv"
+    seed = (args.seed or int(today.replace("-", ""))) + batch - 1
+    meta = {"date": today, "batch": batch, "started_utc": now()}
+    print(f"[*] Batch {batch} for {today} -> {seeds_path}")
 
     mal = pd.concat([fetch_urlhaus(out, meta), fetch_phishtank(out, meta),
                      fetch_openphish(out, meta)], ignore_index=True)
     mal["url"] = mal["url"].astype(str).str.strip()
     mal = mal[mal["url"].str.match(r"^https?://", case=False)]
     mal = mal.drop_duplicates(subset="url")
-    seen = previously_seen(root, today)
+    seen = previously_seen(root, seeds_path)
     before = len(mal)
     mal = mal[~mal["url"].isin(seen)]
     print(f"[*] Malicious: {before:,} unique feed URLs, {len(mal):,} new since earlier days")
     if args.malicious and len(mal) > args.malicious:
         mal = mal.sample(n=args.malicious, random_state=seed)
 
-    ben = fetch_tranco(out, meta, args.benign, seed)
-    ben = ben[~ben["url"].isin(seen)]
+    if args.benign > 0:
+        ben = fetch_tranco(out, meta, args.benign, seed)
+        ben = ben[~ben["url"].isin(seen)]
+    else:
+        ben = pd.DataFrame(columns=["url", "label_hint", "source", "rank"])
 
     seeds = pd.concat([mal, ben], ignore_index=True)
     seeds["rank"] = seeds.get("rank", pd.Series(dtype="float")).fillna("")
     seeds["seed_id"] = seeds["url"].map(sid)
     seeds["feed_date"] = today
     seeds = seeds[["seed_id", "url", "label_hint", "source", "rank", "feed_date"]]
-    seeds.to_csv(out / "seeds.csv", index=False)
+    seeds.to_csv(seeds_path, index=False)
 
     meta["seeds"] = {"total": len(seeds),
                      "by_source": seeds["source"].value_counts().to_dict(),
                      "by_label_hint": {str(k): int(v) for k, v in
                                        seeds["label_hint"].value_counts().items()}}
     meta["finished_utc"] = now()
-    (out / "snapshot.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    print(f"\n[✓] {len(seeds):,} seeds -> {out / 'seeds.csv'}")
+    (day_dir / f"snapshot{suffix}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    print(f"\n[✓] {len(seeds):,} seeds -> {seeds_path}")
     print(seeds["source"].value_counts().to_string())
 
 
