@@ -252,7 +252,7 @@ def main():
     L = np.zeros(N, dtype=np.int16)
     y = np.zeros(N, dtype=np.int8)
     ts = np.zeros(N, dtype=np.float64)
-    sid, src = [], []
+    sid, src, seed_urls, land_urls = [], [], [], []
     for i, x in enumerate(recs):
         feats = hop_features(x["hops"])
         if args.seed_url == "drop":
@@ -265,11 +265,14 @@ def main():
         ts[i] = datetime.fromisoformat(x["t"]).timestamp() if x["t"] else 0
         sid.append(x["r"]["seed_id"])
         src.append(x["r"].get("source", ""))
+        seed_urls.append(x["hops"][0]["url"][:500])     # for the single-URL comparators
+        land_urls.append(x["hops"][-1]["url"][:500])
 
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out / "dataset.npz", X=X, lengths=L, y=y, t=ts,
-                        seed_id=np.array(sid), source=np.array(src))
+                        seed_id=np.array(sid), source=np.array(src),
+                        seed_url=np.array(seed_urls), landing_url=np.array(land_urls))
     (out / "features.json").write_text(json.dumps({"names": NAMES, "max_urls": MAX_URLS,
                                                    "seed_url": args.seed_url,
                                                    "url_features": args.url_features}, indent=2))
