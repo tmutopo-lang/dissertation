@@ -202,13 +202,16 @@ def main():
     ap.add_argument("--seed-url", choices=["keep", "drop"], default="keep",
                     help="'drop' zeroes the URL features of the first hop (shortcut check: "
                          "benign Tranco seeds are bare homepages, malicious seeds are deep links)")
+    ap.add_argument("--url-features", choices=["all", "none"], default="all",
+                    help="'none' zeroes the URL features of EVERY hop: the model then sees only "
+                         "chain structure, network, behaviour, content and timing")
     args = ap.parse_args()
 
     labels = pd.read_csv(args.labels)
     lab = dict(zip(labels["seed_id"], labels["label"]))
     print(f"[*] {len(lab):,} labelled chains in {args.labels}")
 
-    recs, seen_seq, dup, missing = [], {}, 0, 0
+    recs, seen_seq, seen_sid, dup, dup_seed, missing = [], {}, {}, 0, 0, 0
     for pat in args.chains:
         for path in sorted(glob.glob(pat)):
             for line in open(path, encoding="utf-8"):
@@ -223,6 +226,16 @@ def main():
                     continue
                 key = tuple(h["url"] for h in hops)
                 t = r.get("crawl_started_utc") or ""
+                sid_ = r["seed_id"]
+                if sid_ in seen_sid:                  # same seed crawled twice: keep earliest
+                    dup_seed += 1
+                    j = seen_sid[sid_]
+                    if recs[j] is not None and t < recs[j]["t"]:
+                        old_key = tuple(h["url"] for h in recs[j]["hops"])
+                        seen_seq.pop(old_key, None)
+                        recs[j] = {"r": r, "hops": hops, "t": t}
+                        seen_seq[key] = j
+                    continue
                 if key in seen_seq:
                     dup += 1
                     j = seen_seq[key]
@@ -230,6 +243,7 @@ def main():
                         recs[j] = {"r": r, "hops": hops, "t": t}
                     continue
                 seen_seq[key] = len(recs)
+                seen_sid[sid_] = len(recs)
                 recs.append({"r": r, "hops": hops, "t": t})
 
     recs.sort(key=lambda x: x["t"])
@@ -243,6 +257,8 @@ def main():
         feats = hop_features(x["hops"])
         if args.seed_url == "drop":
             feats[0, URL_IDX] = 0.0
+        if args.url_features == "none":
+            feats[:, URL_IDX] = 0.0
         X[i, : len(feats)] = feats
         L[i] = len(feats)
         y[i] = int(lab[x["r"]["seed_id"]])
@@ -255,16 +271,19 @@ def main():
     np.savez_compressed(out / "dataset.npz", X=X, lengths=L, y=y, t=ts,
                         seed_id=np.array(sid), source=np.array(src))
     (out / "features.json").write_text(json.dumps({"names": NAMES, "max_urls": MAX_URLS,
-                                                   "seed_url": args.seed_url}, indent=2))
+                                                   "seed_url": args.seed_url,
+                                                   "url_features": args.url_features}, indent=2))
     report = {"chains": N, "malicious": int(y.sum()), "benign": int(N - y.sum()),
               "malicious_share": round(float(y.mean()), 4) if N else 0,
-              "duplicates_removed": dup, "too_short": missing, "features_per_hop": F,
+              "duplicates_removed": dup, "repeat_seeds_removed": dup_seed, "too_short": missing, "features_per_hop": F,
               "by_source": dict(Counter(src)), "first_crawl": recs[0]["t"] if N else None,
-              "last_crawl": recs[-1]["t"] if N else None, "seed_url": args.seed_url}
+              "last_crawl": recs[-1]["t"] if N else None, "seed_url": args.seed_url,
+              "url_features": args.url_features}
     (out / "build_report.json").write_text(json.dumps(report, indent=2))
     print(f"[✓] {N:,} chains  ({report['malicious']:,} malicious, {report['benign']:,} benign, "
           f"{report['malicious_share']:.1%} malicious)  {F} features per hop")
-    print(f"    duplicates removed: {dup:,}   by source: {report['by_source']}")
+    print(f"    duplicate chains removed: {dup:,}   repeat seeds removed: {dup_seed:,}")
+    print(f"    by source: {report['by_source']}")
     print(f"    -> {out / 'dataset.npz'}")
 
 
