@@ -19,7 +19,7 @@ Single-URL detectors (re-implemented on the URL text, as published):
   --url landing  uses the final URL of the chain
 
 Flow-sequence intrusion detectors (adapted: each redirect hop plays the role of
-a network flow, using the same 68 hop features as the proposed model):
+a network flow, using the same 71 hop features as the proposed model):
   zhao2023    Zhao et al. [43] CNN-AttBiLSTM: 1-D CNN -> Bi-LSTM -> additive attention
   wang2023    Wang et al. [44] Res-TranBiLSTM: residual block -> Transformer encoder
               -> Bi-LSTM (imbalance handled by class weighting, as for every model)
