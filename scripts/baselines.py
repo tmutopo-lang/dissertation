@@ -13,6 +13,10 @@ These models cannot read sequences, so each chain is summarised into one
 fixed-length vector: the first hop, the last hop, and the mean / max / min of
 every hop feature over the chain, plus the chain length.
 
+With --view landing the models see the final (landing) hop only. This is the
+"landing-page detector" baseline of Chapter 4: if it matches the chain models,
+the redirect path adds nothing beyond what the landing page already shows.
+
 Everything else is identical to train_model.py, so the comparison is like for
 like: same dataset file, same temporal 80/10/10 split, same class weighting,
 same threshold calibration on validation data (FPR <= target), same single
@@ -21,6 +25,7 @@ test run, same metrics and bootstrap confidence intervals.
 Usage:
   python scripts/baselines.py --model rf
   python scripts/baselines.py --model all
+  python scripts/baselines.py --model all --view landing
   python scripts/baselines.py --model rf --data data/dataset_struct/dataset.npz --tag structure
 """
 
@@ -53,6 +58,11 @@ def summarise(X, L):
     return np.hstack([first, last, mean, big, small, L[:, None] / T]).astype(np.float32)
 
 
+def landing_only(X, L):
+    """(N, T, F) -> (N, F): features of the final hop only (landing-page baseline)."""
+    return X[np.arange(len(L)), np.maximum(L - 1, 0), :].astype(np.float32)
+
+
 def make(name, seed, pos_share):
     if name == "rf":
         return RandomForestClassifier(n_estimators=400, min_samples_leaf=2, n_jobs=-1,
@@ -77,7 +87,7 @@ def score(model, X):
 def run_one(name, d, args):
     X, L, y, src = d["X"], d["lengths"].astype(int), d["y"].astype(int), d["source"]
     tr, va, te = temporal_split(len(y), src)
-    Z = summarise(X, L)
+    Z = summarise(X, L) if args.view == "chain" else landing_only(X, L)
     sc = StandardScaler().fit(Z[tr])
     Z = sc.transform(Z).astype(np.float32)
 
@@ -104,11 +114,12 @@ def run_one(name, d, args):
         if (yy == 1).any():
             diag[f"recall[{s_name}]"] = float(pp[yy == 1].mean())
 
-    run = f"{args.tag}_{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    label = name if args.view == "chain" else f"{name}_landing"
+    run = f"{args.tag}_{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     out = Path(args.out) / run
     out.mkdir(parents=True, exist_ok=True)
     np.savez(out / "test_scores.npz", y=y[te], s=s_te, seed_id=d["seed_id"][te], source=src[te])
-    report = {"run": run, "arch": name, "args": vars(args),
+    report = {"run": run, "arch": label, "args": vars(args),
               "n": {"train": len(fit_idx), "val": len(va), "test": len(te)},
               "threshold": float(thr), "validation": val_m, "test": test_m, "test_ci95": ci,
               "diagnostics": diag, "train_seconds": round(secs, 1),
@@ -132,6 +143,8 @@ def main():
     ap.add_argument("--model", default="all", choices=["rf", "gb", "svm", "all"])
     ap.add_argument("--target-fpr", type=float, default=0.03)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--view", choices=["chain", "landing"], default="chain",
+                    help="chain = summary of all hops; landing = final hop only")
     ap.add_argument("--svm-max-train", type=int, default=15000)
     ap.add_argument("--out", default="results")
     ap.add_argument("--tag", default="trial")

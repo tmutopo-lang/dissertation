@@ -27,10 +27,17 @@ Architectures (--arch), matching the baselines and ablations of Chapter 3:
   attn        attention only, no recurrent layer             (ablation)
   cnn         1-D CNN                                        (baseline)
 
+Classification head (Figure 4.3): masked mean pooling -> Dense 256 ReLU ->
+dropout -> Dense 128 ReLU -> sigmoid; the same head is used by every
+architecture so that only the encoder differs. Models with attention also
+save their hop-to-hop attention weights for the test chains
+(test_attention.npz) for the demonstration in Chapter 5.
+
 Usage (trial run on a laptop CPU):
   python scripts/train_model.py --arch hybrid --units 64 --layers 1 --epochs 15
 Full configuration from the proposal (256 units per direction, 2 layers, 8 heads):
   python scripts/train_model.py --arch hybrid --units 256 --layers 2
+Tuned configuration: use the command printed by scripts/tune.py.
 """
 
 import argparse
@@ -75,11 +82,16 @@ class MaskedMeanPool(layers.Layer):
         return ops.sum(x * m, axis=1) / ops.maximum(ops.sum(m, axis=1), 1.0)
 
 
-def build(arch, T, F, units=64, layers_n=1, heads=8, dropout=0.3, lr=1e-3):
+def build(arch, T, F, units=64, layers_n=1, heads=8, dropout=0.3, lr=1e-3,
+          dense=(256, 128)):
+    """Returns (model, attention_model). attention_model maps the same inputs to the
+    head-averaged attention weights (None for architectures without attention)."""
     x_in = keras.Input((T, F), name="hops")
     m_in = keras.Input((T,), dtype="bool", name="mask")
-    x = layers.Dense(units * 2, activation="relu", name="hop_projection")(x_in)
-    x = layers.Dropout(dropout)(x)
+    x = x_in
+    if arch == "attn":       # no encoder: project hops to the attention width first
+        x = layers.Dense(units * 2, activation="relu", name="hop_projection")(x)
+        x = layers.Dropout(dropout)(x)
 
     if arch in ("hybrid", "bilstm"):
         for i in range(layers_n):
@@ -97,21 +109,27 @@ def build(arch, T, F, units=64, layers_n=1, heads=8, dropout=0.3, lr=1e-3):
     else:
         raise ValueError(arch)
 
+    att_w = None
     if arch in ("hybrid", "lstm_attn", "attn"):
         att_mask = ops.logical_and(ops.expand_dims(m_in, 1), ops.expand_dims(m_in, 2))
-        a = layers.MultiHeadAttention(num_heads=heads, key_dim=max((units * 2) // heads, 8),
-                                      dropout=dropout, name="multi_head_attention")(
-            x, x, attention_mask=att_mask)
+        a, att_w = layers.MultiHeadAttention(num_heads=heads, key_dim=max((units * 2) // heads, 8),
+                                             dropout=dropout, name="multi_head_attention")(
+            x, x, attention_mask=att_mask, return_attention_scores=True)
         x = layers.LayerNormalization(name="attn_norm")(x + a)
 
     x = MaskedMeanPool(name="masked_mean_pool")(x, m_in)
-    x = layers.Dense(64, activation="relu")(x)
-    x = layers.Dropout(dropout)(x)
+    for i, n in enumerate(dense):                     # classification head (Figure 4.3)
+        x = layers.Dense(n, activation="relu", name=f"dense_{i+1}")(x)
+        if i == 0:
+            x = layers.Dropout(dropout, name="head_dropout")(x)
     out = layers.Dense(1, activation="sigmoid", name="p_malicious")(x)
     model = keras.Model([x_in, m_in], out, name=f"redirect_{arch}")
     model.compile(optimizer=keras.optimizers.Adam(lr), loss="binary_crossentropy",
                   metrics=[keras.metrics.AUC(name="auc")])
-    return model
+    att_model = None
+    if att_w is not None:
+        att_model = keras.Model([x_in, m_in], ops.mean(att_w, axis=1), name="attention_weights")
+    return model, att_model
 
 
 # ─── main ────────────────────────────────────────────────────────────────────
@@ -128,6 +146,9 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch", type=int, default=128)
+    ap.add_argument("--dense", type=int, nargs="+", default=[256, 128],
+                    help="classification head widths (Figure 4.3: 256 128)")
+    ap.add_argument("--patience", type=int, default=5, help="early-stopping patience (epochs)")
     ap.add_argument("--target-fpr", type=float, default=0.03)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--no-class-weight", action="store_true", help="ablation")
@@ -146,13 +167,14 @@ def main():
     print(f"[*] {N:,} chains, {T} hops x {F} features | train {len(tr):,}  val {len(va):,}  "
           f"test {len(te):,} | malicious share train {y[tr].mean():.1%}  test {y[te].mean():.1%}")
 
-    model = build(args.arch, T, F, args.units, args.layers, args.heads, args.dropout, args.lr)
+    model, att_model = build(args.arch, T, F, args.units, args.layers, args.heads,
+                             args.dropout, args.lr, tuple(args.dense))
     print(f"[*] {model.name}: {model.count_params():,} parameters")
     cw = None
     if not args.no_class_weight:
         pos = max(y[tr].mean(), 1e-6)
         cw = {0: 0.5 / (1 - pos), 1: 0.5 / pos}
-    cb = [keras.callbacks.EarlyStopping(monitor="val_auc", mode="max", patience=5,
+    cb = [keras.callbacks.EarlyStopping(monitor="val_auc", mode="max", patience=args.patience,
                                         restore_best_weights=True)]
     t0 = time.time()
     hist = model.fit([Xs[tr], mask[tr]], y[tr], validation_data=([Xs[va], mask[va]], y[va]),
@@ -182,6 +204,10 @@ def main():
     model.save(out / "model.keras")
     np.savez(out / "scaler.npz", mu=mu, sd=sd)
     np.savez(out / "test_scores.npz", y=y[te], s=s_te, seed_id=d["seed_id"][te], source=src[te])
+    if att_model is not None:      # hop-to-hop attention for the demonstration (Chapter 5)
+        w = att_model.predict([Xs[te], mask[te]], batch_size=512, verbose=0)
+        np.savez_compressed(out / "test_attention.npz", w=w.astype(np.float16),
+                            seed_id=d["seed_id"][te], lengths=L[te])
     report = {"run": run, "arch": args.arch, "args": vars(args), "params": int(model.count_params()),
               "n": {"train": len(tr), "val": len(va), "test": len(te)},
               "threshold": thr, "validation": val_m, "test": test_m, "test_ci95": ci,

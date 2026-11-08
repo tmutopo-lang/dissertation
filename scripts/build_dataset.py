@@ -105,7 +105,9 @@ NET_F = ["status_2xx", "status_3xx", "status_4xx", "status_5xx", "status_none",
          "host_change", "regdom_change", "same_regdom_as_seed", "same_regdom_as_landing",
          "ip_change", "has_ip", "tls", "tls_letsencrypt"]
 BEH_F = [f"via_{m}" for m in MECHANISMS] + ["hdr_set_cookie", "hdr_x_powered_by",
-                                             "hdr_server", "hdr_hsts", "ctype_html"]
+                                             "hdr_server", "hdr_hsts", "ctype_html",
+                                             "returns_to_earlier_domain", "domain_changes_so_far",
+                                             "mechanism_change"]
 CON_F = ["has_content", "html_bytes"] + CONTENT_KEYS
 TMP_F = ["dt_prev", "t_elapsed", "position", "is_first", "is_last", "chain_len"]
 FEATURES = ([("url", f) for f in URL_F] + [("network", f) for f in NET_F] +
@@ -120,8 +122,9 @@ def hop_features(hops: list) -> np.ndarray:
     seed_rd = reg_domain(urlsplit(hops[0]["url"]).hostname or "")
     land_rd = reg_domain(urlsplit(hops[-1]["url"]).hostname or "")
     out = np.zeros((n, len(FEATURES)), dtype=np.float32)
-    prev_host = prev_rd = prev_ip = None
+    prev_host = prev_rd = prev_ip = prev_via = None
     prev_t = 0
+    seen_rd, n_changes = [], 0
     for i, h in enumerate(hops):
         url = h.get("url", "")
         sp = urlsplit(url)
@@ -137,6 +140,9 @@ def hop_features(hops: list) -> np.ndarray:
         if via not in MECHANISMS:
             via = "other"
         tld = rd.rsplit(".", 1)[-1] if "." in rd else ""
+        changed = prev_rd is not None and rd != prev_rd
+        n_changes += int(changed)
+        returns = changed and rd in seen_rd[:-1]
         t = h.get("t_ms") or 0
         f = {
             # URL
@@ -172,6 +178,9 @@ def hop_features(hops: list) -> np.ndarray:
             "hdr_set_cookie": float("set-cookie" in hdr), "hdr_x_powered_by": float("x-powered-by" in hdr),
             "hdr_server": float("server" in hdr), "hdr_hsts": float("strict-transport-security" in hdr),
             "ctype_html": float("html" in (hdr.get("content-type") or "")),
+            "returns_to_earlier_domain": float(returns),
+            "domain_changes_so_far": n_changes / MAX_URLS,
+            "mechanism_change": float(i >= 2 and via != prev_via),
             # Content
             "has_content": float("n_forms" in h), "html_bytes": l1p(h.get("html_bytes", 0)),
             **{k: l1p(h.get(k, 0)) for k in CONTENT_KEYS},
@@ -181,7 +190,8 @@ def hop_features(hops: list) -> np.ndarray:
             "chain_len": n / MAX_URLS,
         }
         out[i] = [f[name] for _, name in FEATURES]
-        prev_host, prev_rd, prev_t = host, rd, t
+        prev_host, prev_rd, prev_t, prev_via = host, rd, t, via
+        seen_rd.append(rd)
         prev_ip = h.get("server_ip") or prev_ip
     return out
 
@@ -202,6 +212,8 @@ def main():
     ap.add_argument("--seed-url", choices=["keep", "drop"], default="keep",
                     help="'drop' zeroes the URL features of the first hop (shortcut check: "
                          "benign Tranco seeds are bare homepages, malicious seeds are deep links)")
+    ap.add_argument("--drop-dim", choices=["url", "network", "behavioural", "content", "temporal"],
+                    default=None, help="feature-group ablation: zero one of the five dimensions")
     ap.add_argument("--url-features", choices=["all", "none"], default="all",
                     help="'none' zeroes the URL features of EVERY hop: the model then sees only "
                          "chain structure, network, behaviour, content and timing")
@@ -259,6 +271,8 @@ def main():
             feats[0, URL_IDX] = 0.0
         if args.url_features == "none":
             feats[:, URL_IDX] = 0.0
+        if args.drop_dim:
+            feats[:, [j for j, (dd, _) in enumerate(FEATURES) if dd == args.drop_dim]] = 0.0
         X[i, : len(feats)] = feats
         L[i] = len(feats)
         y[i] = int(lab[x["r"]["seed_id"]])
@@ -275,7 +289,8 @@ def main():
                         seed_url=np.array(seed_urls), landing_url=np.array(land_urls))
     (out / "features.json").write_text(json.dumps({"names": NAMES, "max_urls": MAX_URLS,
                                                    "seed_url": args.seed_url,
-                                                   "url_features": args.url_features}, indent=2))
+                                                   "url_features": args.url_features,
+                                                   "drop_dim": args.drop_dim}, indent=2))
     report = {"chains": N, "malicious": int(y.sum()), "benign": int(N - y.sum()),
               "malicious_share": round(float(y.mean()), 4) if N else 0,
               "duplicates_removed": dup, "repeat_seeds_removed": dup_seed, "too_short": missing, "features_per_hop": F,
