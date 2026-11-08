@@ -174,7 +174,7 @@ def build_alhassan2024(T, F, units=64, dropout=0.3):
 def run_one(name, d, names, args):
     X, L, y, src = d["X"], d["lengths"].astype(int), d["y"].astype(int), d["source"]
     N, T, F = X.shape
-    tr, va, te = temporal_split(N)
+    tr, va, te = temporal_split(N, src)
 
     if name in ("do2025", "asiri2024"):
         if "seed_url" not in d:

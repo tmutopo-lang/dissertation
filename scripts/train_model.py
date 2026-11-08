@@ -141,7 +141,7 @@ def main():
     d = load(args.data)
     X, L, y, src = d["X"], d["lengths"].astype(int), d["y"].astype(int), d["source"]
     N, T, F = X.shape
-    tr, va, te = temporal_split(N)
+    tr, va, te = temporal_split(N, src)
     Xs, mask, mu, sd = standardise(X, L, tr)
     print(f"[*] {N:,} chains, {T} hops x {F} features | train {len(tr):,}  val {len(va):,}  "
           f"test {len(te):,} | malicious share train {y[tr].mean():.1%}  test {y[te].mean():.1%}")

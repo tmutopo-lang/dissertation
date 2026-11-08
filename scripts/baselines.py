@@ -76,7 +76,7 @@ def score(model, X):
 
 def run_one(name, d, args):
     X, L, y, src = d["X"], d["lengths"].astype(int), d["y"].astype(int), d["source"]
-    tr, va, te = temporal_split(len(y))
+    tr, va, te = temporal_split(len(y), src)
     Z = summarise(X, L)
     sc = StandardScaler().fit(Z[tr])
     Z = sc.transform(Z).astype(np.float32)

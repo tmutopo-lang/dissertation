@@ -4,7 +4,7 @@ eval_common.py
 Shared evaluation protocol (Chapter 3, Section 3.5.4), used by train_model.py,
 baselines.py and the comparators, so that every model is judged identically:
 
-  temporal_split  oldest 80% train, next 10% validation, newest 10% test
+  temporal_split  stratified by seed source: oldest 80% / next 10% / newest 10% of each source
   calibrate       threshold from VALIDATION data: highest recall with FPR <= target,
                   then the lowest FPR among those thresholds
   metrics         FPR, recall, precision, F1, accuracy, AUC-ROC, precision at a 1% base rate
@@ -15,11 +15,27 @@ import numpy as np
 from sklearn.metrics import roc_auc_score
 
 
-def temporal_split(n, frac=(0.8, 0.1, 0.1)):
-    """Rows must already be sorted by crawl time (build_dataset.py does this)."""
-    a = int(n * frac[0])
-    b = int(n * (frac[0] + frac[1]))
-    return np.arange(0, a), np.arange(a, b), np.arange(b, n)
+def temporal_split(n, groups=None, frac=(0.8, 0.1, 0.1)):
+    """Stratified temporal split (research proposal: 80-10-10 stratified).
+
+    Rows must already be sorted by crawl time (build_dataset.py does this).
+    Within each group (the seed source: phishtank, openphish, urlhaus, tranco,
+    tranco_outlink) the oldest 80% go to training, the next 10% to validation
+    and the newest 10% to test. Time order is kept inside every source, and
+    every source - and therefore both classes - appears in every partition.
+    Without stratification, a batch crawled at the end of the window (e.g. an
+    all-benign outbound-link crawl) can fill the whole test set on its own.
+    """
+    if groups is None:
+        groups = np.zeros(n, dtype=int)
+    groups = np.asarray(groups)
+    tr, va, te = [], [], []
+    for g in np.unique(groups):
+        idx = np.where(groups == g)[0]          # already in time order
+        a = int(round(len(idx) * frac[0]))
+        b = int(round(len(idx) * (frac[0] + frac[1])))
+        tr.append(idx[:a]); va.append(idx[a:b]); te.append(idx[b:])
+    return tuple(np.sort(np.concatenate(p)).astype(int) for p in (tr, va, te))
 
 
 def calibrate(y_val, s_val, target):
