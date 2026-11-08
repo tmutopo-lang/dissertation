@@ -67,7 +67,7 @@ def landing(rec: dict) -> str:
 
 
 def is_feed_seed(rec: dict) -> bool:
-    return rec.get("source") in ("phishtank", "openphish", "urlhaus")
+    return rec.get("source") in ("phishtank", "openphish", "urlhaus", "phishunt", "phishstats")
 
 
 def read_chains(patterns):
@@ -326,7 +326,8 @@ def load_feed_urls():
                         urls.add(row["url"].strip())
         except Exception:
             pass
-    for f in glob.glob("data/raw/**/openphish_feed.txt", recursive=True):
+    for f in (glob.glob("data/raw/**/openphish_feed.txt", recursive=True)
+              + glob.glob("data/raw/**/phishunt_feed.txt", recursive=True)):
         urls.update(l.strip() for l in open(f, encoding="utf-8", errors="ignore") if l.strip())
     for f in glob.glob("data/raw/**/urlhaus_*.txt", recursive=True):
         lines = [l for l in open(f, encoding="utf-8", errors="ignore")
@@ -336,6 +337,11 @@ def load_feed_urls():
                 if cell.startswith("http"):
                     urls.add(cell.strip())
                     break
+    for f in glob.glob("data/raw/**/phishstats_api.json", recursive=True):
+        try:
+            urls.update(str(u.get("url", "")).strip() for u in json.load(open(f, encoding="utf-8")))
+        except Exception:
+            pass
     for f in glob.glob("data/raw/**/urlhaus_recent.json", recursive=True):
         try:
             urls.update(u["url"] for u in json.load(open(f, encoding="utf-8")).get("urls", []))

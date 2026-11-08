@@ -11,6 +11,8 @@ writes a dated snapshot that the crawler uses as its seed list:
       urlhaus_online.csv      raw feed as downloaded
       phishtank_online.csv    raw feed (if reachable)
       openphish_feed.txt      raw feed
+      phishunt_feed.txt       raw feed (phishunt.io, hourly, CC0)
+      phishstats_api.json     raw API response (PhishStats)
       tranco_<LISTID>.csv     raw Tranco list
       seeds.csv               seed_id, url, label_hint, source, rank, feed_date
       snapshot.json           list ID, download times, counts (for Chapter 4)
@@ -145,6 +147,73 @@ def fetch_openphish(out: Path, meta: dict) -> pd.DataFrame:
         return pd.DataFrame(columns=["url", "label_hint", "source"])
 
 
+def fetch_phishunt(out: Path, meta: dict) -> pd.DataFrame:
+    """phishunt.io: suspicious phishing URLs, updated hourly, public domain (CC0),
+    no key needed. One URL per line."""
+    print("[*] Phishunt (hourly feed)...")
+    try:
+        r = requests.get("https://phishunt.io/feed.txt", headers=UA, timeout=60)
+        r.raise_for_status()
+        (out / "phishunt_feed.txt").write_text(r.text, encoding="utf-8")
+        urls = [l.strip() for l in r.text.splitlines()
+                if l.strip().lower().startswith(("http://", "https://"))]
+        meta["phishunt"] = {"downloaded_utc": now(), "rows": len(urls)}
+        print(f"    {len(urls):,} URLs")
+        return pd.DataFrame({"url": urls, "label_hint": 1, "source": "phishunt"})
+    except Exception as e:
+        print(f"    failed: {e}")
+        meta["phishunt"] = {"error": str(e)[:200]}
+        return pd.DataFrame(columns=["url", "label_hint", "source"])
+
+
+def fetch_phishstats(out: Path, meta: dict, pages: int, min_score: float) -> pd.DataFrame:
+    """PhishStats API: newest phishing URLs with a 0-10 phish score. Anonymous use
+    allows 50 requests a day per IP (more with a free key in PHISHSTATS_API_KEY),
+    so at most --phishstats-pages requests are made, 100 URLs each."""
+    print("[*] PhishStats (API)...")
+    key = os.environ.get("PHISHSTATS_API_KEY", "").strip()
+    hdr = dict(UA, **({"X-API-Key": key} if key else {}))
+    bases = ["https://api.phishstats.info/api/phishing",
+             "https://phishstats.info:2096/api/phishing"]
+    rows, used, base_ok, err = [], 0, None, None
+    for base in bases:
+        try:
+            for page in range(1, pages + 1):
+                r = requests.get(base, headers=hdr, timeout=60,
+                                 params={"_sort": "-date", "_size": 100, "_p": page})
+                used += 1
+                r.raise_for_status()
+                data = r.json()
+                items = data if isinstance(data, list) else data.get("data", data.get("results", []))
+                if not items:
+                    break
+                rows.extend(items)
+                base_ok = base
+            if base_ok:
+                break
+        except Exception as e:
+            err = str(e)[:200]
+            continue
+    if not rows:
+        print(f"    failed or empty ({err})")
+        meta["phishstats"] = {"error": err, "requests": used}
+        return pd.DataFrame(columns=["url", "label_hint", "source"])
+    (out / "phishstats_api.json").write_text(json.dumps(rows), encoding="utf-8")
+    urls = []
+    for it in rows:
+        u = str(it.get("url", "")).strip()
+        try:
+            score = float(it.get("score", 10))
+        except (TypeError, ValueError):
+            score = 10.0
+        if u.lower().startswith(("http://", "https://")) and score >= min_score:
+            urls.append(u)
+    meta["phishstats"] = {"downloaded_utc": now(), "endpoint": base_ok, "requests": used,
+                          "rows": len(rows), "kept_score_ge": min_score, "kept": len(urls)}
+    print(f"    {len(rows):,} URLs, {len(urls):,} with score >= {min_score:g}")
+    return pd.DataFrame({"url": urls, "label_hint": 1, "source": "phishstats"})
+
+
 def fetch_tranco(out: Path, meta: dict, n: int, seed: int) -> pd.DataFrame:
     """Sample n domains equally across four rank bands (Chapter 3, Section 3.5.2)."""
     print("[*] Tranco (benign seeds)...")
@@ -192,6 +261,10 @@ def main():
     ap.add_argument("--malicious", type=int, default=0,
                     help="cap on malicious seeds today (0 = all new feed URLs)")
     ap.add_argument("--seed", type=int, default=0, help="sampling seed (default: derived from date)")
+    ap.add_argument("--phishstats-pages", type=int, default=20,
+                    help="PhishStats API requests per run (100 URLs each; anonymous limit 50/day)")
+    ap.add_argument("--phishstats-min-score", type=float, default=5.0,
+                    help="keep PhishStats URLs with phish score >= this (0-10 scale)")
     args = ap.parse_args()
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -211,7 +284,9 @@ def main():
     print(f"[*] Batch {batch} for {today} -> {seeds_path}")
 
     mal = pd.concat([fetch_urlhaus(out, meta), fetch_phishtank(out, meta),
-                     fetch_openphish(out, meta)], ignore_index=True)
+                     fetch_openphish(out, meta), fetch_phishunt(out, meta),
+                     fetch_phishstats(out, meta, args.phishstats_pages, args.phishstats_min_score)],
+                    ignore_index=True)
     mal["url"] = mal["url"].astype(str).str.strip()
     mal = mal[mal["url"].str.match(r"^https?://", case=False)]
     mal = mal.drop_duplicates(subset="url")
